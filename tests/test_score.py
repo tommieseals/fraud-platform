@@ -1,75 +1,58 @@
 """Tests for fraud scoring service."""
 import pytest
-from fastapi.testclient import TestClient
 import sys
-from pathlib import Path
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+from scorer.features import extract_features, features_to_array, FEATURE_NAMES
+from scorer.rules import RulesEngine
 
-from scorer.app import app
-from scorer.rules import RuleEngine, check_fraud_rules
-
-
-client = TestClient(app)
-
-
-class TestHealthEndpoint:
-    def test_health_returns_200(self):
-        response = client.get("/health")
-        assert response.status_code == 200
+class TestFeatureExtraction:
+    def test_extract_features_basic(self):
+        txn = {"amount": 100.0, "hour": 14, "day_of_week": 2, "velocity_1h": 2, "is_new_device": False}
+        features = extract_features(txn)
+        assert "amount_log" in features
+        assert "hour_sin" in features
+        assert features["is_weekend"] == 0
+        assert features["is_night"] == 0
     
-    def test_health_returns_status(self):
-        response = client.get("/health")
-        data = response.json()
-        assert "status" in data
-        assert data["status"] == "healthy"
-
-
-class TestRuleEngine:
-    def test_high_velocity_triggers(self):
-        engine = RuleEngine()
-        txn = {"velocity_1h": 10}
-        flags = engine.evaluate(txn)
-        assert any("HIGH_VELOCITY" in f for f in flags)
+    def test_extract_features_night(self):
+        txn = {"amount": 50, "hour": 3, "day_of_week": 1, "velocity_1h": 0, "is_new_device": False}
+        features = extract_features(txn)
+        assert features["is_night"] == 1
     
-    def test_new_device_triggers(self):
-        engine = RuleEngine()
-        txn = {"is_new_device": True}
-        flags = engine.evaluate(txn)
-        assert any("NEW_DEVICE" in f for f in flags)
+    def test_extract_features_weekend(self):
+        txn = {"amount": 50, "hour": 12, "day_of_week": 6, "velocity_1h": 0, "is_new_device": False}
+        features = extract_features(txn)
+        assert features["is_weekend"] == 1
     
-    def test_unusual_hour_triggers(self):
-        engine = RuleEngine()
-        txn = {"hour": 3}
-        flags = engine.evaluate(txn)
-        assert any("UNUSUAL_HOUR" in f for f in flags)
+    def test_features_to_array(self):
+        txn = {"amount": 100, "hour": 12, "day_of_week": 0, "velocity_1h": 1, "is_new_device": True}
+        features = extract_features(txn)
+        arr = features_to_array(features)
+        assert len(arr) == len(FEATURE_NAMES)
+
+class TestRulesEngine:
+    def setup_method(self):
+        self.engine = RulesEngine()
     
-    def test_high_amount_triggers(self):
-        engine = RuleEngine()
-        txn = {"amount": 1000}
-        flags = engine.evaluate(txn)
-        assert any("HIGH_AMOUNT" in f for f in flags)
-
-
-class TestScoreEndpoint:
-    def test_score_requires_model(self):
-        txn = {
-            "transaction_id": "txn_test",
-            "user_id": "user_123",
-            "amount": 50.0,
-            "hour": 14,
-            "day_of_week": 2,
-            "velocity_1h": 1,
-            "is_new_device": False
-        }
-        response = client.post("/score", json=txn)
-        assert response.status_code in [200, 503]
+    def test_high_velocity_rule(self):
+        txn = {"velocity_1h": 10, "amount": 100, "hour": 12, "is_new_device": False}
+        result = self.engine.evaluate(txn)
+        assert result["rules_count"] > 0
+        rule_names = [r["rule"] for r in result["rules_triggered"]]
+        assert "high_velocity" in rule_names
     
-    def test_score_validates_input(self):
-        invalid_txn = {"transaction_id": "test"}
-        response = client.post("/score", json=invalid_txn)
-        assert response.status_code == 422
-
+    def test_new_device_high_amount(self):
+        txn = {"velocity_1h": 1, "amount": 600, "hour": 12, "is_new_device": True}
+        result = self.engine.evaluate(txn)
+        rule_names = [r["rule"] for r in result["rules_triggered"]]
+        assert "new_device_high_amount" in rule_names
+    
+    def test_clean_transaction(self):
+        txn = {"velocity_1h": 1, "amount": 50, "hour": 14, "is_new_device": False}
+        result = self.engine.evaluate(txn)
+        assert result["rules_count"] == 0
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
