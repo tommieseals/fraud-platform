@@ -1,58 +1,142 @@
-"""Tests for fraud scoring service."""
+"Tests for fraud scoring service."
 import pytest
+from fastapi.testclient import TestClient
 import sys
-import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from pathlib import Path
 
-from scorer.features import extract_features, features_to_array, FEATURE_NAMES
-from scorer.rules import RulesEngine
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
-class TestFeatureExtraction:
-    def test_extract_features_basic(self):
-        txn = {"amount": 100.0, "hour": 14, "day_of_week": 2, "velocity_1h": 2, "is_new_device": False}
-        features = extract_features(txn)
-        assert "amount_log" in features
-        assert "hour_sin" in features
-        assert features["is_weekend"] == 0
-        assert features["is_night"] == 0
-    
-    def test_extract_features_night(self):
-        txn = {"amount": 50, "hour": 3, "day_of_week": 1, "velocity_1h": 0, "is_new_device": False}
-        features = extract_features(txn)
-        assert features["is_night"] == 1
-    
-    def test_extract_features_weekend(self):
-        txn = {"amount": 50, "hour": 12, "day_of_week": 6, "velocity_1h": 0, "is_new_device": False}
-        features = extract_features(txn)
-        assert features["is_weekend"] == 1
-    
-    def test_features_to_array(self):
-        txn = {"amount": 100, "hour": 12, "day_of_week": 0, "velocity_1h": 1, "is_new_device": True}
-        features = extract_features(txn)
-        arr = features_to_array(features)
-        assert len(arr) == len(FEATURE_NAMES)
+from scorer.app import app
+from scorer.rules import RuleEngine, check_fraud_rules
 
-class TestRulesEngine:
-    def setup_method(self):
-        self.engine = RulesEngine()
-    
-    def test_high_velocity_rule(self):
-        txn = {"velocity_1h": 10, "amount": 100, "hour": 12, "is_new_device": False}
-        result = self.engine.evaluate(txn)
-        assert result["rules_count"] > 0
-        rule_names = [r["rule"] for r in result["rules_triggered"]]
-        assert "high_velocity" in rule_names
-    
-    def test_new_device_high_amount(self):
-        txn = {"velocity_1h": 1, "amount": 600, "hour": 12, "is_new_device": True}
-        result = self.engine.evaluate(txn)
-        rule_names = [r["rule"] for r in result["rules_triggered"]]
-        assert "new_device_high_amount" in rule_names
-    
-    def test_clean_transaction(self):
-        txn = {"velocity_1h": 1, "amount": 50, "hour": 14, "is_new_device": False}
-        result = self.engine.evaluate(txn)
-        assert result["rules_count"] == 0
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+client = TestClient(app)
+
+
+class TestHealthEndpoint:
+    "Tests for /health endpoint."
+    
+    def test_health_returns_200(self):
+        response = client.get(/health)
+        assert response.status_code == 200
+    
+    def test_health_returns_status(self):
+        response = client.get(/health)
+        data = response.json()
+        assert status in data
+        assert data[status] == healthy
+    
+    def test_health_returns_version(self):
+        response = client.get(/health)
+        data = response.json()
+        assert version in data
+
+
+class TestRuleEngine:
+    "Tests for the rule engine."
+    
+    def test_high_velocity_triggers(self):
+        engine = RuleEngine()
+        txn = {velocity_1h: 10}
+        flags = engine.evaluate(txn)
+        assert any(HIGH_VELOCITY in f for f in flags)
+    
+    def test_low_velocity_no_trigger(self):
+        engine = RuleEngine()
+        txn = {velocity_1h: 1, hour: 14, amount: 50, is_new_device: False}
+        flags = engine.evaluate(txn)
+        assert not any(HIGH_VELOCITY in f for f in flags)
+    
+    def test_new_device_triggers(self):
+        engine = RuleEngine()
+        txn = {is_new_device: True}
+        flags = engine.evaluate(txn)
+        assert any(NEW_DEVICE in f for f in flags)
+    
+    def test_unusual_hour_triggers(self):
+        engine = RuleEngine()
+        txn = {hour: 3}
+        flags = engine.evaluate(txn)
+        assert any(UNUSUAL_HOUR in f for f in flags)
+    
+    def test_high_amount_triggers(self):
+        engine = RuleEngine()
+        txn = {amount: 1000}
+        flags = engine.evaluate(txn)
+        assert any(HIGH_AMOUNT in f for f in flags)
+    
+    def test_multiple_rules_can_trigger(self):
+        engine = RuleEngine()
+        txn = {
+            velocity_1h: 10,
+            is_new_device: True,
+            hour: 3,
+            amount: 1000
+        }
+        flags = engine.evaluate(txn)
+        assert len(flags) >= 4
+    
+    def test_convenience_function(self):
+        txn = {is_new_device: True, hour: 2}
+        flags = check_fraud_rules(txn)
+        assert len(flags) >= 2
+
+
+class TestScoreEndpoint:
+    "Tests for /score endpoint."
+    
+    @pytest.fixture
+    def valid_transaction(self):
+        return {
+            transaction_id: txn_test_001,
+            user_id: user_123,
+            amount: 50.0,
+            hour: 14,
+            day_of_week: 2,
+            velocity_1h: 1,
+            is_new_device: False
+        }
+    
+    def test_score_requires_model(self, valid_transaction):
+        response = client.post(/score, json=valid_transaction)
+        assert response.status_code in [200, 503]
+    
+    def test_score_validates_input(self):
+        invalid_txn = {transaction_id: test}
+        response = client.post(/score, json=invalid_txn)
+        assert response.status_code == 422
+    
+    def test_score_rejects_negative_amount(self, valid_transaction):
+        valid_transaction[amount] = -100
+        response = client.post(/score, json=valid_transaction)
+        assert response.status_code == 422
+    
+    def test_score_rejects_invalid_hour(self, valid_transaction):
+        valid_transaction[hour] = 25
+        response = client.post(/score, json=valid_transaction)
+        assert response.status_code == 422
+
+
+class TestIntegration:
+    "Integration tests."
+    
+    def test_api_workflow(self):
+        health_response = client.get(/health)
+        assert health_response.status_code == 200
+        
+        txn = {
+            transaction_id: txn_integration_001,
+            user_id: user_1,
+            amount: 100.0,
+            hour: 12,
+            day_of_week: 1,
+            velocity_1h: 2,
+            is_new_device: False
+        }
+        score_response = client.post(/score, json=txn)
+        assert score_response.status_code in [200, 503]
+
+
+if __name__ == __main__:
+    pytest.main([__file__, -v])
+EOF

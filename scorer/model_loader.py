@@ -1,7 +1,6 @@
 """Model loading utilities."""
 import joblib
 import os
-import numpy as np
 
 class ModelLoader:
     """Lazy model loader with caching."""
